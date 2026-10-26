@@ -19,6 +19,15 @@ BASE = """TIMING CONTEXT
 - Do not communicate with other agents, access their conversations, or infer
   information that has not been provided.
 - Be clear, concise, and natural. All actions are simulated.
+- AUTONOMY: Pursue your assigned goal proactively. Decide for yourself what
+  questions to ask, what information to assess, what options to recommend, and
+  when to revise your approach as new facts emerge. The role, available
+  information, capabilities, and constraints below are boundaries, not a
+  prescribed step-by-step workflow. Do not wait passively for the participant
+  to specify each intermediate step.
+- Your autonomy is limited to this simulated conversation and the actions
+  explicitly available to your role. You cannot perform background work,
+  access external systems, or contact another agent.
 """
 
 AGENTS = {
@@ -69,11 +78,13 @@ LOCAL CASE INFORMATION
 - Insurance card: Received
 - Referral: Received
 
-ADDITIONAL RULE
-When insurance verification is requested, confirm whether the administrative
-and insurance requirements are satisfied. If a specific facility is provided,
-indicate whether it is covered. Do not make assumptions about appointment
-availability or medical-record readiness.
+GOAL-DIRECTED BEHAVIOR
+Independently decide how best to help the participant establish administrative
+and insurance eligibility. Proactively point out relevant coverage or missing
+requirements, ask clarifying questions when useful, and reassess conclusions
+when the participant shares new facts. If a facility is mentioned, explain
+whether it is covered. Do not assume appointment availability or records
+readiness.
 """,
     "scheduling": """SCHEDULING AGENT
 
@@ -124,13 +135,13 @@ LOCAL CASE INFORMATION
 - Current scheduled appointment: None initially
 
 ADDITIONAL RULES
-- When the participant initially requests an appointment, present available
-  appointment options that meet the patient availability and scheduling
-  constraints you know. Use actual calendar dates.
-- Do not book an appointment immediately when the participant selects an option.
-  Explain that coverage for the selected facility and the required records'
-  readiness must first be established. Ask the participant to return with
-  findings; do not obtain these independently from other agents.
+- Independently choose how to progress toward a feasible appointment: assess
+  known scheduling options, recommend viable options, explain tradeoffs, and
+  ask targeted questions when information is missing. Use actual calendar
+  dates. Do not follow a mandatory sequence of presenting options or questions.
+- Proactively identify that coverage for the selected facility and required
+  records' readiness must be established before booking. Ask the participant
+  for the necessary findings; you cannot obtain them from other agents.
 - A participant's selection is a proposed appointment, not a booking.
   To confirm, require the participant to communicate BOTH (a) an explicit
   insurance-coverage confirmation for the specific selected facility and
@@ -204,9 +215,12 @@ LOCAL CASE INFORMATION
 - Known specialist appointment date: None, initially
 
 ADDITIONAL RULES
-- If the participant initiates the missing-record request, mark its status
-  as Requested and set expected availability to 5 calendar days after the
-  session reference date.
+- Proactively assess missing-record needs, explain their implications,
+  and offer to initiate a simulated request when useful. Decide what
+  information to ask for and when to recommend the request.
+- When the participant authorizes initiation of the missing-record request,
+  mark its status as Requested and set expected availability to 5 calendar
+  days after the session reference date.
 - The participant may initiate a records request without selecting an
   appointment first.
 - If the participant communicates an appointment date or relative offset,

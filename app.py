@@ -1,9 +1,10 @@
-import os, sqlite3, secrets, hmac, csv, io, time
+import os, sqlite3, secrets, hmac, csv, io, time, json
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, request, jsonify, Response, abort, render_template_string
 from openai import OpenAI
 from agents import AGENTS, BASE, BRIEF
+from agent_runtime import TOOLS, execute, load_state
 
 app = Flask(__name__)
 DB = os.environ.get("DATABASE_PATH", "research.db")
@@ -24,7 +25,8 @@ def init():
           id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL,
           agent TEXT, kind TEXT NOT NULL, role TEXT, content TEXT,
           timestamp TEXT NOT NULL, latency_ms INTEGER);
-          CREATE INDEX IF NOT EXISTS event_session ON events(token,id);""")
+          CREATE INDEX IF NOT EXISTS event_session ON events(token,id);
+          CREATE TABLE IF NOT EXISTS agent_state (token TEXT NOT NULL, agent TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(token,agent));""")
 init()
 def stamp(): return datetime.now(timezone.utc).isoformat()
 def log(token, kind, agent=None, role=None, content=None, latency=None):
@@ -92,12 +94,52 @@ def chat(agent):
                        (s["token"],agent)).fetchall()
     if len(hist)>=100: return jsonify(error="Message limit reached."),429
     log(s["token"],"message",agent,"user",text)
-    msgs=[{"role":"system","content":BASE.format(reference_date=s["refdate"])+"\n"+AGENTS[agent]}]
+    user_history=[r["content"] for r in hist if r["role"]=="user"]+[text]
+    with db() as c:
+        local_state=load_state(c,s["token"],agent)
+    instructions=(BASE.format(reference_date=s["refdate"])+"\\n"+AGENTS[agent]+
+        "\\n\\nTOOL-USE RULES: You have real SIMULATED tools. Pursue the participant's broad "+
+        "objective proactively: decide which checks/actions are appropriate, invoke tools "+
+        "without waiting for instructions for each step, then report what actually happened. "+
+        "A records request is a routine permitted action: initiate it when the record is missing. "+
+        "Do not claim to perform an action unless its tool returned success. "+
+        "Never pretend an appointment is booked if booking was denied. "+
+        "Scheduling must obtain explicit participant-reported facility coverage, "+
+        "records readiness BEFORE the appointment, and explicit booking permission. "+
+        "The tool enforces these requirements. Never fabricate user quotes or tool results. "+
+        "Do not contact other agents or assume their findings. "+
+        "No external healthcare systems are connected. "+
+        "Your prior locally persisted action state: "+json.dumps(local_state))
+    msgs=[{"role":"system","content":instructions}]
     msgs.extend({"role":r["role"],"content":r["content"]} for r in hist)
     msgs.append({"role":"user","content":text})
     t=time.monotonic()
     try:
-        reply=OpenAI(api_key=KEY,timeout=60).chat.completions.create(model=MODEL,messages=msgs).choices[0].message.content or ""
+        client=OpenAI(api_key=KEY,timeout=60)
+        reply=""
+        for round_number in range(6):
+            completion=client.chat.completions.create(model=MODEL,messages=msgs,tools=TOOLS[agent],tool_choice="auto")
+            message=completion.choices[0].message
+            if not message.tool_calls:
+                reply=message.content or ""
+                break
+            msgs.append(message.model_dump(exclude_none=True))
+            for tool_call in message.tool_calls:
+                try:
+                    args=json.loads(tool_call.function.arguments or "{}")
+                    with db() as conn:
+                        outcome=execute(conn,s["token"],agent,s["refdate"],tool_call.function.name,args,user_history,text)
+                    log(s["token"],"agent_action",agent,tool_call.function.name,
+                        json.dumps({"input":args,"result":outcome},sort_keys=True))
+                except Exception:
+                    app.logger.exception("Simulated agent action failed")
+                    outcome={"error":"Simulated action failed; no successful action should be reported"}
+                    log(s["token"],"agent_action_error",agent,tool_call.function.name)
+                msgs.append({"role":"tool","tool_call_id":tool_call.id,"content":json.dumps(outcome)})
+        else:
+            # Avoid a false assertion of success if the model exceeds its tool budget.
+            msgs.append({"role":"system","content":"Tool budget reached. Summarize only confirmed action results; do not invoke tools."})
+            reply=client.chat.completions.create(model=MODEL,messages=msgs).choices[0].message.content or ""
     except Exception:
         app.logger.exception("AI request failed")
         log(s["token"],"model_error",agent)

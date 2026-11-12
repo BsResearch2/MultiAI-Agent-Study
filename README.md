@@ -1,6 +1,6 @@
 # Multi-AI Agent Coordination Study
 
-**Separate private research repository**. No files or deployment resources are shared with the algorithmic-control experiment.
+**Separate private research repository**. 
 
 ## Prototype features
 - Three agent chat panels displayed side by side: Insurance, Scheduling, and Records & Labs

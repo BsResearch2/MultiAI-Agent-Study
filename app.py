@@ -97,8 +97,8 @@ def chat(agent):
     user_history=[r["content"] for r in hist if r["role"]=="user"]+[text]
     with db() as c:
         local_state=load_state(c,s["token"],agent)
-    instructions=(BASE.format(reference_date=s["refdate"])+"\\n"+AGENTS[agent]+
-        "\\n\\nTOOL-USE RULES: You have real SIMULATED tools. Pursue the participant's broad "+
+    instructions=(BASE.format(reference_date=s["refdate"])+"\n"+AGENTS[agent]+
+        "\n\nTOOL-USE RULES: You have real SIMULATED tools. Pursue the participant's broad "+
         "objective proactively: decide which checks/actions are appropriate, invoke tools "+
         "without waiting for instructions for each step, then report what actually happened. "+
         "A records request is a routine permitted action: initiate it when the record is missing. "+

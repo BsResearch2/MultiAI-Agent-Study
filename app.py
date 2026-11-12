@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify, Response, abort, render_template_stri
 from openai import OpenAI
 from agents import AGENTS, BASE, BRIEF
 from agent_runtime import TOOLS, execute, load_state
+from expanded_case import configured as expanded_configured, case as expanded_data, TOOLS as EXPANDED_TOOLS, evaluate as expanded_execute, role_instructions as expanded_instructions
 
 app = Flask(__name__)
 DB = os.environ.get("DATABASE_PATH", "research.db")
@@ -26,9 +27,14 @@ def init():
           agent TEXT, kind TEXT NOT NULL, role TEXT, content TEXT,
           timestamp TEXT NOT NULL, latency_ms INTEGER);
           CREATE INDEX IF NOT EXISTS event_session ON events(token,id);
-          CREATE TABLE IF NOT EXISTS agent_state (token TEXT NOT NULL, agent TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(token,agent));""")
+          CREATE TABLE IF NOT EXISTS agent_state (token TEXT NOT NULL, agent TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(token,agent));
+          CREATE TABLE IF NOT EXISTS session_modes (token TEXT PRIMARY KEY, mode TEXT NOT NULL);""")
 init()
 def stamp(): return datetime.now(timezone.utc).isoformat()
+def mode(token):
+    with db() as conn:
+        row=conn.execute("SELECT mode FROM session_modes WHERE token=?", (token,)).fetchone()
+    return row["mode"] if row else "original"
 def log(token, kind, agent=None, role=None, content=None, latency=None):
     with db() as c:
         c.execute("INSERT INTO events(token,agent,kind,role,content,timestamp,latency_ms) VALUES(?,?,?,?,?,?,?)",
@@ -55,11 +61,18 @@ def start():
     pid=str(payload.get("participant","")).strip()
     if not (2<=len(pid)<=50 and all(ch.isalnum() or ch in "-_" for ch in pid)):
         return jsonify(error="Use a 2–50 character participant ID (letters, numbers, - or _)."),400
+    chosen="expanded" if expanded_configured() else "original"
+    if chosen=="expanded":
+        try: expanded_data()
+        except Exception:
+            app.logger.exception("Expanded case configuration invalid")
+            return jsonify(error="Researcher expanded-case configuration is invalid."),503
     token=secrets.token_urlsafe(32)
     # Study date is frozen for the whole participant session.
     ref=datetime.now().astimezone().date().isoformat()
     with db() as c: c.execute("INSERT INTO sessions VALUES(?,?,?,?,?)",(token,pid,ref,stamp(),None))
-    log(token,"session_start")
+    with db() as c: c.execute("INSERT INTO session_modes(token,mode) VALUES(?,?)",(token,chosen))
+    log(token,"session_start",content=chosen)
     return jsonify(token=token,reference_date=ref)
 @app.get("/api/session")
 def restore():
@@ -94,6 +107,7 @@ def chat(agent):
                        (s["token"],agent)).fetchall()
     if len(hist)>=100: return jsonify(error="Message limit reached."),429
     log(s["token"],"message",agent,"user",text)
+    expanded=mode(s["token"])=="expanded"
     user_history=[r["content"] for r in hist if r["role"]=="user"]+[text]
     with db() as c:
         local_state=load_state(c,s["token"],agent)
@@ -110,6 +124,9 @@ def chat(agent):
         "Do not contact other agents or assume their findings. "+
         "No external healthcare systems are connected. "+
         "Your prior locally persisted action state: "+json.dumps(local_state))
+    if expanded:
+        instructions=expanded_instructions(agent,s["refdate"])+ "\nYour existing role-specific action state: "+json.dumps(local_state)
+    available_tools=EXPANDED_TOOLS[agent] if expanded else TOOLS[agent]
     msgs=[{"role":"system","content":instructions}]
     msgs.extend({"role":r["role"],"content":r["content"]} for r in hist)
     msgs.append({"role":"user","content":text})
@@ -118,7 +135,7 @@ def chat(agent):
         client=OpenAI(api_key=KEY,timeout=60)
         reply=""
         for round_number in range(6):
-            completion=client.chat.completions.create(model=MODEL,messages=msgs,tools=TOOLS[agent],tool_choice="auto")
+            completion=client.chat.completions.create(model=MODEL,messages=msgs,tools=available_tools,tool_choice="auto")
             message=completion.choices[0].message
             if not message.tool_calls:
                 reply=message.content or ""
@@ -128,7 +145,10 @@ def chat(agent):
                 try:
                     args=json.loads(tool_call.function.arguments or "{}")
                     with db() as conn:
-                        outcome=execute(conn,s["token"],agent,s["refdate"],tool_call.function.name,args,user_history,text)
+                        if expanded:
+                            outcome=expanded_execute(conn,s["token"],agent,s["refdate"],tool_call.function.name,args,user_history,text)
+                        else:
+                            outcome=execute(conn,s["token"],agent,s["refdate"],tool_call.function.name,args,user_history,text)
                     log(s["token"],"agent_action",agent,tool_call.function.name,
                         json.dumps({"input":args,"result":outcome},sort_keys=True))
                 except Exception:

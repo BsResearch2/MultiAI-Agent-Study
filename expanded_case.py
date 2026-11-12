@@ -45,6 +45,7 @@ TOOLS={
     tool("propose_appointment","Save a recommended option without reserving it",{"option":OPT},["option"]),
     tool("hold_appointment","Independently place a reversible simulated hold for one option; does not constitute a booking",{"option":OPT},["option"]),
     tool("release_hold","Release the local hold",{}),
+    tool("cancel_appointment","Cancel a booked simulated appointment only on explicit current participant authorization",{"authorization_quote":QUOTE},["authorization_quote"]),
     tool("book_appointment","Book only with explicit current authorization and prior explicit participant-reported coverage and records-readiness. Provide exact participant quotations.",{"option":OPT,"coverage_quote":QUOTE,"records_quote":QUOTE,"authorization_quote":QUOTE},["option","coverage_quote","records_quote","authorization_quote"]),
     tool("get_scheduling_status","Review current proposal, hold and booking")
  ],
@@ -114,6 +115,12 @@ def evaluate(c,token,agent,ref,name,args,user_messages,current_message):
             result={"status":status,"appointment":view(option_map[option]),"note":"A hold is reversible and is NOT a confirmed booking"}
         elif name=="release_hold":
             result={"status":"hold_released","previous_hold":state.pop("hold",None)}
+        elif name=="cancel_appointment":
+            aq=args.get("authorization_quote")
+            if not quote_exists(aq,[current_message]) or not any(w in aq.lower() for w in ("cancel","release")):
+                return {"error":"Explicit participant cancellation request required in the current message"}
+            prior=state.pop("booking",None)
+            result={"status":"booking_cancelled" if prior else "nothing_booked","previous_booking":prior}
         elif name=="book_appointment":
             option=args.get("option")
             if option not in option_map:return {"error":"Unknown appointment option"}
@@ -125,9 +132,9 @@ def evaluate(c,token,agent,ref,name,args,user_messages,current_message):
                 return {"error":"Coverage confirmation must explicitly identify the selected specialist as covered"}
             if item["specialist"].lower() not in rq.lower() and iso(ref,item["day"]) not in rq and ("day +"+str(item["day"])) not in rq.lower():
                 return {"error":"Records confirmation must refer to this specialist or appointment date"}
-            if not any(w in rq.lower() for w in ("record","document","lab")) or not any(w in rq.lower() for w in ("ready","available","before","by ","arrive")) or any(w in rq.lower() for w in ("not ready","unavailable","won't be ready","cannot be ready")):
+            if not any(w in rq.lower() for w in ("record","document","lab")) or not any(w in rq.lower() for w in ("ready","available","before","by ","arrive")) or any(w in rq.lower() for w in ("not ready","not available","unavailable","won't be ready","cannot be ready","unknown","unsure","not sure","don't know")):
                 return {"error":"Records-readiness confirmation missing or negative"}
-            if not any(w in aq.lower() for w in ("book","schedule","confirm","reserve")):
+            if not any(w in aq.lower() for w in ("book","schedule","confirm","reserve")) or any(w in aq.lower() for w in ("do not","don't","not yet","wait","hold off")):
                 return {"error":"Explicit current booking authorization required"}
             if state.get("booking") and state["booking"]!=option:return {"error":"Existing booking must be cancelled before another booking"}
             state["booking"]=option

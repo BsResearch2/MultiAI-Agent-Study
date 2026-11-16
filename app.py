@@ -134,7 +134,7 @@ def chat(agent):
     try:
         client=OpenAI(api_key=KEY,timeout=60)
         reply=""
-        for round_number in range(6):
+        for round_number in range(10 if expanded else 6):
             completion=client.chat.completions.create(model=MODEL,messages=msgs,tools=available_tools,tool_choice="auto")
             message=completion.choices[0].message
             if not message.tool_calls:

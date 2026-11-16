@@ -55,6 +55,9 @@ TOOLS={
     tool("request_document","Independently initiate a routine simulated request for an existing record, no real-world action",{"document":DOC},["document"]),
     tool("check_request_status","Retrieve a document's request status",{"document":DOC},["document"]),
     tool("assess_document_readiness","Compare the required records to an explicitly supplied specialist and appointment date. Expected dates are predictions only.",{"specialist":SPEC,"appointment_date":DATE},["specialist","appointment_date"]),
+    tool("prepare_specialist_packet","Assemble a destination-specific list of required existing documents, identify gaps, and persist the packet for a specialist named by the participant. This is not transmission.",{"specialist":SPEC,"specialist_quote":QUOTE},["specialist","specialist_quote"]),
+    tool("queue_record_transfer","Queue a simulated transfer of the prepared packet to the specialist, after initiating missing-document requests. Predict delivery based on document availability; delivery is NOT yet confirmed.",{"specialist":SPEC},["specialist"]),
+    tool("assess_transfer_readiness","Evaluate the queued specialist-specific transfer against the appointment date: only a correctly addressed packet with required requests initiated can be predicted to arrive on time.",{"specialist":SPEC,"appointment_date":DATE},["specialist","appointment_date"]),
     tool("get_records_status","Review all local requests and status")
  ]
 }
@@ -132,7 +135,7 @@ def evaluate(c,token,agent,ref,name,args,user_messages,current_message):
                 return {"error":"Coverage confirmation must explicitly identify the selected specialist as covered"}
             if item["specialist"].lower() not in rq.lower() and iso(ref,item["day"]) not in rq and ("day +"+str(item["day"])) not in rq.lower():
                 return {"error":"Records confirmation must refer to this specialist or appointment date"}
-            if not any(w in rq.lower() for w in ("record","document","lab")) or not any(w in rq.lower() for w in ("ready","available","before","by ","arrive")) or any(w in rq.lower() for w in ("not ready","not available","unavailable","won't be ready","cannot be ready","unknown","unsure","not sure","don't know")):
+            if not any(w in rq.lower() for w in ("packet","transfer","records delivery","document delivery")) or not any(w in rq.lower() for w in ("queued","scheduled","arrive","before","by ")) or any(w in rq.lower() for w in ("not ready","not available","unavailable","won't be ready","cannot be ready","unknown","unsure","not sure","don't know")):
                 return {"error":"Records-readiness confirmation missing or negative"}
             if not any(w in aq.lower() for w in ("book","schedule","confirm","reserve")) or any(w in aq.lower() for w in ("do not","don't","not yet","wait","hold off")):
                 return {"error":"Explicit current booking authorization required"}
@@ -159,6 +162,50 @@ def evaluate(c,token,agent,ref,name,args,user_messages,current_message):
                 state.setdefault("requests",{})[doc]={"status":"requested","expected_availability":iso(ref,source["days"])}
             item=state.get("requests",{}).get(doc)
             result={"document":doc,"status":("received" if source["status"]=="received" else item["status"] if item else source["status"]),"expected_availability":item["expected_availability"] if item else None,"note":"Requested is not the same as received"}
+        elif name=="prepare_specialist_packet":
+            sp=args.get("specialist");q=args.get("specialist_quote")
+            if sp not in reqs:return {"error":"Unknown specialist"}
+            if not quote_exists(q,user_messages) or sp.lower() not in q.lower():
+                return {"error":"A participant must specify the intended specialist in this conversation"}
+            previous=state.get("packet")
+            packet={"specialist":sp,"required_documents":reqs[sp],"status":"prepared_not_sent"}
+            state["packet"]=packet
+            state.pop("transfer",None)
+            result={"packet":packet,"missing_requests":[d for d in reqs[sp] if docs[d]["status"]!="received" and d not in state.get("requests",{})],
+                    "previous_packet_invalidated":bool(previous and previous["specialist"]!=sp)}
+        elif name=="queue_record_transfer":
+            sp=args.get("specialist")
+            packet=state.get("packet")
+            if not packet or packet.get("specialist")!=sp:
+                return {"error":"Prepare a specialist-specific packet first; the intended specialist must come from the participant"}
+            missing=[d for d in reqs[sp] if docs[d]["status"]!="received" and d not in state.get("requests",{})]
+            if missing:return {"error":"Initiate requests for missing documents before queueing transfer","outstanding_request_actions":missing}
+            expected_dates=[ref if docs[d]["status"]=="received" else state["requests"][d]["expected_availability"] for d in reqs[sp]]
+            # In this frozen-time simulation, electronic transfer can occur on
+            # the date all source documents are expected to become available.
+            expected_delivery=max(expected_dates)
+            transfer={"destination_specialist":sp,"status":"queued_not_delivered",
+                      "expected_delivery":expected_delivery,
+                      "required_documents":reqs[sp],"method":"simulated electronic delivery"}
+            state["transfer"]=transfer
+            packet["status"]="transfer_queued"
+            result={"transfer":transfer,"note":"Queueing is an actual simulated state change. It is NOT proof of transmission or receipt."}
+        elif name=="assess_transfer_readiness":
+            sp=args.get("specialist");day=args.get("appointment_date")
+            if sp not in reqs:return {"error":"Unknown specialist"}
+            try: target=date.fromisoformat(day)
+            except (ValueError,TypeError):return {"error":"Invalid YYYY-MM-DD appointment date"}
+            if not (date.fromisoformat(ref)<=target<=date.fromisoformat(iso(ref,6))):return {"error":"Appointment outside the six-day window"}
+            transfer=state.get("transfer")
+            if not transfer or transfer["destination_specialist"]!=sp:
+                return {"specialist":sp,"appointment_date":day,"transfer_ready":False,
+                        "reason":"No transfer queued for this specialist. Obtain the destination from the participant, prepare the correct packet and queue transfer."}
+            predicted=transfer["expected_delivery"]<day
+            result={"specialist":sp,"appointment_date":day,"transfer_queued":True,
+                    "predicted_delivery":transfer["expected_delivery"],
+                    "predicted_arrival_before_appointment":predicted,
+                    "delivery_confirmed":False,
+                    "note":"Simulated future transfer is queued; actual delivery has not occurred."}
         elif name=="assess_document_readiness":
             sp=args.get("specialist");day=args.get("appointment_date")
             if sp not in reqs:return {"error":"Unknown specialist"}
@@ -172,7 +219,7 @@ def evaluate(c,token,agent,ref,name,args,user_messages,current_message):
                 predicted=received or bool(request and date.fromisoformat(request["expected_availability"])<target)
                 details.append({"document":doc,"status":"received" if received else "requested" if request else source["status"],"predicted_ready_before":predicted,"expected_date":request["expected_availability"] if request else None})
             result={"specialist":sp,"appointment_date":day,"predicted_ready_before_appointment":all(x["predicted_ready_before"] for x in details),"documents":details,"note":"Predictions only; requests do not imply physical receipt"}
-        else:result={"requests":state.get("requests",{}),"reviewed":state.get("reviewed",False)}
+        else:result={"requests":state.get("requests",{}),"reviewed":state.get("reviewed",False),"prepared_packet":state.get("packet"),"queued_transfer":state.get("transfer")}
     save(c,token,agent,state)
     return result
 
@@ -187,6 +234,6 @@ def role_instructions(agent,ref):
        "Avoid prescriptive sequencing: use your own judgement about local next steps. ")
     specific={
      "insurance":"You are Onboarding & Insurance. Your objective is to verify registration, active coverage, referrals and provider network eligibility. Use your tools. You cannot see scheduling availability or medical records. Specialist-specific coverage may differ from facility coverage. Do not schedule appointments.",
-     "scheduling":"You are Scheduling. Your objective is to identify and manage promising specialist appointments. Search, propose, and autonomously place or release reversible holds when useful. A hold is not a booking. For FINAL booking obtain exact participant-provided specialist-specific insurance and documentation readiness confirmations plus new explicit human booking authorization. Do not independently infer insurance or documentation. You may not communicate with other agents.",
-     "records":"You are Records & Labs. Your objective is to prepare already existing records required for the selected specialist. Review documents, ask which specialist is relevant, initiate routine requests without requiring step-by-step authorization, and assess expected readiness when given an appointment date. You cannot order medical tests, schedule appointments or assess coverage. A requested record is NOT received. You do not know specialist selection until informed by the human."}
+     "scheduling":"You are Scheduling. Your objective is to identify and manage promising specialist appointments. Search, propose, and autonomously place or release reversible holds when useful. A hold is not a booking. For FINAL booking obtain exact participant-provided specialist-specific insurance confirmation and confirmation that the correct specialist-directed record packet is queued to arrive before the appointment, plus new explicit human booking authorization. Do not independently infer insurance or documentation. You may not communicate with other agents.",
+     "records":"You are Records & Labs. Your job is not just to report dates: independently obtain missing existing documents, assemble a destination-specific packet, and queue its simulated delivery to the selected specialist. Begin routine retrievals proactively. Ask the human which specialist will receive the packet; do not infer Scheduling\u0027s choice. A change of specialist invalidates the prior packet and transfer. When an appointment date is supplied, assess whether the queued transfer is expected to arrive before that appointment. Clearly distinguish a prepared packet, a queued simulated delivery, and confirmed receipt; no receipt can be claimed while time is frozen. You cannot order new tests, book appointments, assess coverage, contact other agents, or inspect their state."}
     return shared+specific[agent]
